@@ -1,0 +1,609 @@
+---
+title: "Polygenic score workshop"
+output: html_document
+date: "27-03-2025"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(tidyr)
+library(dplyr)
+library(bigsnpr)
+library(ggplot2)
+library(reshape2)
+library(purrr)
+library(broom)
+library(forcats)
+library(glue)
+```
+
+
+## Step 1 - Genotyping + Phasing + Imputation + QC 
+
+Not covered here.
+See https://cnsgenomics.com/data/teaching/GNGWS24/module5/Lecture6_PGS_pipeline.pdf
+
+
+### Public imputed dataset (1000 Genomes, phase 2 covers actually 2500 Genomes)
+
+```{bash, eval = FALSE}
+## The imputed data is chromosome 22 from 1000 Genomes Project
+## https://bochet.gcc.biostat.washington.edu/beagle/1000_Genomes_phase3_v5a/b37.vcf/chr22.1kg.phase3.v5a.vcf.gz
+
+# non.eur.excl list from https://bochet.gcc.biostat.washington.edu/beagle/1000_Genomes_phase3_v5a/sample_info/integrated_call_samples_v3.20130502.ALL.panel
+
+wget https://bochet.gcc.biostat.washington.edu/beagle/1000_Genomes_phase3_v5a/b37.vcf/chr22.1kg.phase3.v5a.vcf.gz
+
+plink2 
+  --vcf chr22.1kg.phase3.v5a.vcf.gz \
+  --geno \
+  --hwe 1e-50 \
+  --maf 0.05 \
+  --max-alleles 2 \
+  --mind 0.6 \
+  --snps-only \
+  --chr 22 \
+  --from-bp 34494914 \
+  --to-bp 37570269 \
+  --keep non.eur.excl \
+  --make-bed \
+  --out imp_1000k_chr22_QC
+  
+# 2,001 samples and 9,319 variants remaining
+```
+
+### Description of genetic data
+
+```{r}
+# This function converts the plink .bed format to a .rds/.bk R-readable file
+if (!file.exists("data/imp_1000k_chr22_QC.bk")) bigsnpr::snp_readBed("data/imp_1000k_chr22_QC.bed")
+
+# The bim file contains snp-wise information
+bim <- data.table::fread("data/imp_1000k_chr22_QC.bim")
+
+genetic_data <- bigsnpr::snp_attach("data/imp_1000k_chr22_QC.rds")
+
+# Do not do this with large data, you may use the bigsnpr object instead
+# https://privefl.github.io/bigsnpr/
+G <- genetic_data$genotypes[]
+
+dim(G)
+N <- nrow(G) # Number of samples
+M <- ncol(G) # Number of variants
+
+# Allele frequency distribution
+
+# Alleles in PLINK:
+# A1: The reference or effect allele.
+# A2: The alternate or non-effect allele.
+
+# 0: Homozygous for the non-reference allele (A2A2)
+# 1: Heterozygous (A1A2)
+# 2: Homozygous for the reference allele (A1A1)
+
+freq_a1 <- (2 * colSums(G == 2) + colSums(G == 1)) / (2 * N)
+
+hist(freq_a1)
+
+# When running a GWAS/PGS, the effect size is then associated with a risk variant.
+# This would be the case if the A1 was the minor allele, but PLINK usually 
+# shuffles the labels so one should always double-check with the reference genome.
+
+
+```
+
+
+## Step 2 - Phenotyping (simulate heritable case/control outcome from real genotypes)
+
+### 2.1 Simulation of heritable phenotypes from public genotype data
+
+```{r }
+
+# GENETIC ARCHITECTURE PARAMETERS
+h2 <- 0.2
+p <- 0.001
+
+# Simulate from G dimensions (N individuals and M SNPs) a quantitative trait
+# with underlying h2 variance attributed to M*p causal variants.
+# Everyone will get a slightly different phenotype
+pheno <- bigsnpr::snp_simuPheno(genetic_data$genotypes, h2 = h2, M = round(M*p))
+phenotype_q <- pheno$pheno
+
+# Extract the simulated set of causal SNPs and corresponding effect sizes
+set <- pheno$set
+effects <- pheno$allelic_effects
+
+# The underlying genetic liability for the simulated quantitative phenotype is:
+genetic_liability <- G[,set] %*% effects
+
+# The simulated phenotype is thus distributed like:
+
+tibble(PHENOTIPIC = phenotype_q,
+       GENETIC = genetic_liability,
+       ENVIRONMENTAL = phenotype_q - genetic_liability) %>%
+  pivot_longer(1:3, names_to = "Variance") %>%
+  ggplot(aes(x = value, fill = Variance, color = Variance)) + geom_density(alpha = 0.3) +
+  theme_minimal()
+
+var(genetic_liability)
+var(phenotype_q - genetic_liability)
+
+       
+```
+
+### 2.2 From quantitative to binary phenotype (The liability threshold model)
+
+```{r}
+
+# The LTM states that if a disease comes from an underlying continuous distribution,
+# then the cases will have the largest values.
+# The threshold for becoming a case is set by the population prevalence
+# of the disease.
+# Lee et al. 2012 https://pubmed.ncbi.nlm.nih.gov/22714935/
+
+tibble(phenotype_q = phenotype_q) %>%
+         expand_grid(k = c(0.02,  0.1, 0.2, 0.5)) %>%
+  mutate(threshold = round(qnorm(1 - k), 1),
+         case = case_when(phenotype_q > threshold ~ "Cases",
+                          TRUE ~ "Controls")) %>%
+  ggplot(aes(x = phenotype_q)) +
+  geom_density(aes(fill = case), alpha = 0.3) + 
+  geom_vline(aes(xintercept = threshold), color = "red") +
+  facet_grid(~paste0("Prevalence: ", k) + paste0("Threshold: ", threshold)) +
+  theme_minimal() +
+  labs(title = "LTH split of phenotypic distribution to create cases and controls")
+
+# In real life, we don't know the underlying genetic liability but here we can also
+# see if there are any differences.
+
+# Difference in mean genetic liability between cases and controls 
+
+tibble(phenotype_q = phenotype_q,
+       genetic_liability = genetic_liability) %>%
+         expand_grid(k = c(0.02,  0.1, 0.2, 0.5)) %>%
+  mutate(threshold = round(qnorm(1 - k), 1),
+         case = case_when(phenotype_q > threshold ~ "Cases",
+                          TRUE ~ "Controls")) %>%
+  group_by(k, threshold, case) %>%
+  summarise(m_genetic_l = round(mean(genetic_liability), 2)) %>%
+  pivot_wider(names_from = case, values_from = m_genetic_l) %>%
+  mutate(Difference = Cases - Controls)
+
+# Set population prevalence and convert phenotype to binary case/control
+
+k <- 0.5 # Population prevalence
+phenotype_b <- 1*(phenotype_q > qnorm(1 - k)) # Threshold in a SND, k proportion top risk
+table(phenotype_b)
+
+
+```
+
+
+### 2.3 Split simulated data in training (discovery) and test (target) sets.
+
+In real scenarios, we'll get the GWAS summary statistics file from a 
+discovery GWAS sample because we won't have access to the individual-level data.
+
+To simulate this scenario, we will run a GWAS on 70% of the data and keep the 
+30% for testing the PGS prediction accuracy.
+
+```{r}
+# Split data
+set.seed(555)
+training.set <- sample(1:N, 0.7*N) # 70% for training
+test.set <- setdiff(1:N, training.set) # 30% for testing
+
+# Training set
+y_train <- phenotype_b[training.set]
+
+# Save the test G matrix for later as target set
+if (!file.exists("data/imp_1000k_chr22_QC_test.bk")) bigsnpr::snp_subset(genetic_data, ind.row = test.set, backingfile = "data/imp_1000k_chr22_QC_test")
+
+# And save phenotype in the fake .fam file
+fam_test <- tibble(nid = test.set, phen = phenotype_b[test.set])
+data.table::fwrite(fam_test, file = "data/imp_1000k_chr22_QC_test.fam", col.names = F, sep = " ")
+
+```
+
+
+## Step 3 - GWAS
+
+Run an association test per SNP using logistic regression. Here the bigstatsr::big_univLogReg
+function allows to do the calculation without the G matrix being loaded in RStudio.
+Other common software: PLINK, FASTGWA, 
+
+```{r}
+
+# Association tests: M
+
+
+# GWAS
+# 1 second to run
+system.time(
+  gwas <- bigstatsr::big_univLogReg(X = genetic_data$genotypes, 
+                                              y01.train = y_train,
+                                              ind.train = training.set))
+p.value <- predict(gwas, log10 = F)
+
+# The p-value distribution already tells you if there is an enrichment of
+# associated SNPs
+hist(p.value)
+
+# Visualize the results in a Manhattan plot
+man <- tibble(pos = bim$V4, lp = -log10(p.value), is_causal = 1:M %in% set, freq = freq_a1, beta = gwas$estim)
+man %>%
+  ggplot(aes(pos, lp)) + 
+  geom_point() + 
+  geom_point(data = man[man$is_causal,], aes(colour = is_causal), size = 3) +
+  scale_colour_manual(values = c("green")) +
+  labs(title = "Manhattan Plot",
+       subtitle = paste("h2:", h2, " # causal:", length(set)),
+       y = expression(-log[10](italic("p-value")))) + theme_minimal()
+
+# Why aren't the causal variants the ones with smallest p-value?
+
+ggplot(man, aes(x = freq, y = beta)) + geom_point(color = "gray") +
+  geom_point(data = man[man$is_causal,], aes(colour = lp), size = 3) 
+  
+
+```
+
+
+#### 3.1 Save GWAS summary statistics for GWAS p1 (h2=0.1 and p=0.001)
+
+```{r}
+
+# The effective sample size per SNP is used in many PGS methods
+n_eff <- 4/(1/(sum(y_train == 0)) + 1/(sum(y_train == 1)))
+
+# Format to .ma
+# .ma format (GCTA / GCTB: https://yanglab.westlake.edu.cn/software/gcta/#COJO)
+true_effects <- rep(0, M)
+true_effects[set] <- effects
+
+sumstats <- cbind(bim, gwas, freq = freq_a1, p = p.value, N = n_eff, 
+                  causal = 1:M %in% set, true_effect = true_effects) %>%
+  rename(SNP = V2, A1 = V5, A2 = V6, b = estim, se = std.err) %>%
+  select(SNP, A1, A2, freq, b, se, p, N, causal, true_effect) 
+
+
+# Write simulated phenotype 1 simulated GWAS sumstats
+data.table::fwrite(sumstats, glue("data/gwas_simulation_h2_{h2*100}_pM_{round(p*M, 0)}.txt"), sep = " ")
+
+
+```
+
+
+### Step 4 - Run polygenic score models
+
+Let's assume we have been given the file `r glue("gwas_simulation_h2_{h2*100}_pM_{round(p*M, 0)}.txt")` 
+as the summary statistics we need to calculate a PGS.
+
+We don't know the parameters h2 and p, nor the causal variant set.
+
+```{r}
+bim <- data.table::fread("data/imp_1000k_chr22_QC.bim")
+
+genetic_data <- bigsnpr::snp_attach("data/imp_1000k_chr22_QC_test.rds")
+G <- genetic_data$genotypes[]
+
+dim(G)
+
+sumstats <- data.table::fread(glue("data/gwas_simulation_h2_{h2*100}_pM_{round(p*M, 0)}.txt"))
+# Split data
+fam <- data.table::fread("data/imp_1000k_chr22_QC_test.fam")
+test.set <- fam$V1
+y_test <- fam$V2
+
+table(y_test)
+```
+
+
+#### 4.1 QC and restrict SNPs
+
+Usually, there will be SNPs missing from the GWAS summary statistics so it is 
+important to restrict to common SNPs before running any PGS method 
+(unlike it is the case when using scores from PGS Catalog).
+
+```{r}
+
+idx_snps <- which(bim$V2 %in% sumstats$SNP)
+
+```
+
+#### 4.2 Train polygenic score
+
+##### METHOD 0: Use all SNPs
+
+If the infinitesimal model was true, then all SNPs would have a true effect and
+contribute towards the PGS prediction.
+
+```{r}
+
+snps_0 <- 1:M
+weights_0 <- sumstats$b
+
+```
+
+##### METHOD 1: Only thresholding
+
+Use all genome-wide significant SNPs from the GWAS.
+
+```{r}
+
+snps_1 <- which(sumstats$p < 0.05/M) # Bonferroni significant SNPs
+weights_1 <- sumstats$b[snps_1]
+
+```
+
+
+##### METHOD 2: Only clumping
+
+Use all genome-wide significant SNPs from the GWAS.
+
+```{r}
+
+# The clumping algorithm again calculates the pairwise SNP correlation between
+# SNPs in a window (500 bp) and selects a set of SNPs uncorrelated < threshold 
+# acording to some ranking variable (S). In this case, -log10 pvalues.
+clumped_set <- bigsnpr::snp_clumping(G = genetic_data$genotypes, 
+                               infos.chr = bim$V1[idx_snps],
+                               size = 500,
+                               thr.r2 = 0.2,
+                               S = -log10(sumstats$p))
+
+snps_2 <- clumped_set
+weights_2 <- sumstats$b[clumped_set]
+
+```
+
+
+
+##### METHOD 3: Clumping + Thresholding
+
+```{r}
+
+snps_3 <- intersect(snps_1, clumped_set)
+weights_3 <- sumstats$b[snps_3]
+
+```
+
+
+##### METHOD 4: LDpred
+
+
+##### LD reference
+
+For LDpred (and other Bayesian methods), a reference LD matrix is needed in order
+to model the correlation between the SNPs. The aim is that the correlation in the
+LD matrix represents as truthfully as possible the correlation in the real data.
+Most methods provide pre-computed LD matrices for several genetic ancestries:
+
+- LDpred (https://privefl.github.io/bigsnpr/articles/LDpred2.html#which-set-of-variants-to-use)
+- SBayesRC (https://github.com/zhilizheng/SBayesRC?tab=readme-ov-file#resources)
+
+Because our dataset is small, we can quickly compute the LD matrix from the test
+data.
+
+```{r}
+# Example, what is the correlation between two contiguous SNPs in the G matrix?
+snp1 <- G[,59]
+snp2 <- G[,60]
+cor(snp1, snp2)
+
+# And the correlation between two clumped SNPs?
+
+snp1 <- G[,clumped_set[2]]
+snp2 <- G[,clumped_set[3]]
+cor(snp1, snp2)
+
+# Now calculate the correlation between all pairs of SNPs in the G matrix to 
+# know the non-independent structure of the data (20sec, with the full G takes 1min)
+
+system.time(corr0 <- snp_cor(Gna = genetic_data$genotypes, 
+                             ind.col = idx_snps,
+                             infos.pos = bim$V4[idx_snps]))
+
+dim(corr0)
+
+if (!file.exists("data/corr.sbk")) {
+  corr <- as_SFBM(corr0, "data/corr", compact = TRUE)
+  saveRDS(corr, "data/corr.rds")} else corr <- readRDS("corr.rds")
+
+
+# Visualize correlation matrix
+# Plot heatmap for a 1k x 1k block
+cor_melted <- melt(as.matrix(corr0)[2000:3000, 2000:3000])
+colnames(cor_melted) <- c("SNP1", "SNP2", "Correlation")
+
+ggplot(cor_melted, aes(x = SNP1, y = SNP2, fill = Correlation)) + 
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                       midpoint = 0, limit = c(-1,1), space = "Lab", 
+                       name="Correlation") +
+  theme_minimal() + 
+  labs(title = "Correlation Matrix Heatmap (1,000 SNPs Subsample)", 
+       x = "SNPs", y = "SNPs")
+
+
+# Visualize heatmap for clumped SNPs
+cor_melted <- melt(as.matrix(corr0)[clumped_set, clumped_set])
+colnames(cor_melted) <- c("SNP1", "SNP2", "Correlation")
+
+ggplot(cor_melted, aes(x = SNP1, y = SNP2, fill = Correlation)) + 
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                       midpoint = 0, limit = c(-1,1), space = "Lab", 
+                       name="Correlation") +
+  theme_minimal() + 
+  labs(title = "Correlation Matrix Heatmap CLUMPED SNPS", 
+       x = "SNPs", y = "SNPs")
+
+
+```
+
+#### Run LDpred2(auto)
+
+```{r}
+
+# LDpred internal table format
+sumstats_ldpredf <- sumstats %>%
+  rename(beta = b, beta_se = se, n_eff = N) %>% 
+  select(beta, beta_se, n_eff)
+
+# 20sec to run / Note it does not use the G matrix for anything
+system.time(ldpred2_auto <- bigsnpr::snp_ldpred2_auto(corr = corr,
+                                                 df_beta = sumstats_ldpredf,
+                                                 h2_init = 0.1, 
+                                                 vec_p_init = seq_log(1e-4, 0.2, 20),
+                                                 allow_jump_sign = FALSE,
+                                                 shrink_corr = 0.95, use_MLE = FALSE,
+                                                 ncores = nb_cores()))
+
+# Examine results. LDpred runs 20 chains of the Gibbs sampler by default.
+# Each chain path can be visualized:
+auto <- ldpred2_auto[[1]]  # first chain
+plot_grid(
+  qplot(y = auto$path_p_est) + 
+    theme_bigstatsr() + 
+    geom_hline(yintercept = auto$p_est, col = "blue") +
+    scale_y_log10() +
+    labs(y = "p"),
+  qplot(y = auto$path_h2_est) + 
+    theme_bigstatsr() + 
+    geom_hline(yintercept = auto$h2_est, col = "blue") +
+    labs(y = "h2"),
+  ncol = 1, align = "hv"
+)
+
+```
+
+
+In the LDpred2-auto tutorial, you can see how the chains usually converge to a
+more accurate h2 and p estimates with larger datasets.
+
+https://privefl.github.io/bigsnpr/articles/LDpred2.html#ldpred2-auto-automatic-model
+
+
+#### Select "good" chains for robustness
+
+
+```{r}
+
+(range <- sapply(ldpred2_auto, function(auto) diff(range(auto$corr_est))))
+
+(keep <- which(range > (0.95 * quantile(range, 0.95, na.rm = TRUE))))
+
+beta_auto <- rowMeans(sapply(ldpred2_auto[keep], function(auto) auto$beta_est))
+
+weights_4 <- beta_auto
+
+```
+
+
+#### Visualize and compare the LDpred adjusted betas to the GWAS betas
+
+```{r}
+
+betas_gwas <- sumstats$b
+
+# Thresholding
+betas_m1 <- rep(0, M)
+betas_m1[snps_1] <- weights_1
+# Clumping
+betas_m2 <- rep(0, M)
+betas_m2[snps_2] <- weights_2
+# Clumping + Thresholding
+betas_m3 <- rep(0, M)
+betas_m3[snps_3] <- weights_3
+
+
+tibble(i = 1:M, betas_gwas = betas_gwas) %>%
+  left_join(bind_rows(
+    tibble(i = 1:M, betas = betas_gwas, Model = "All"),  
+    tibble(i = 1:M, betas = sumstats$true_effect, Model = "TRUE"),  
+    tibble(i = 1:M, betas = betas_m1, Model = "Thresholding"),
+    tibble(i = 1:M, betas = betas_m2, Model = "Clumping"),
+    tibble(i = 1:M, betas = betas_m3, Model = "C+T"),
+    tibble(i = 1:M, betas = weights_4, Model = "LDpred"))) %>%
+  mutate(Model = fct_relevel(as.factor(Model), c("All", "TRUE", "Thresholding", "Clumping", "C+T", "LDpred"))) %>%
+  group_by(Model) %>% 
+  mutate(nonzero = sum(betas != 0)) %>%
+  filter(betas != 0 ) %>%
+  ggplot(aes(x = betas, y = betas_gwas, color = Model)) +
+  geom_point() + facet_grid(~Model + nonzero) + 
+  geom_vline(xintercept = 0, linetype = 2) +
+  theme_minimal()
+
+
+```
+
+
+### Step 5 - Compare prediction accuracy
+
+There are several ways to compare the prediction accuracy of a PGS.
+Most common ones include R2, AUC and OR quantiles
+
+```{r}
+
+# Calculate PGS for each model
+all_pgs <- tibble(y_test,
+                  pred_true = (G %*% sumstats$true_effect)[,1],
+                  pred_all = (G %*% sumstats$b)[,1],
+                  pred_T = (G %*% betas_m1)[,1],
+                  pred_C = (G %*% betas_m2)[,1],
+                  pred_CT = (G %*% betas_m3)[,1],
+                  pred_LDpred = (G %*% weights_4)[,1]) %>%
+  pivot_longer(2:7, names_to = "PGS") %>%
+  mutate(PGS = fct_recode(as.factor(PGS), "All" = "pred_all", "TRUE" = "pred_true", "Thresholding" = "pred_T", "Clumping" = "pred_C", "C+T" = "pred_CT", "LDpred" = "pred_LDpred"),
+         PGS = fct_relevel(as.factor(PGS), c("TRUE", "All", "Thresholding", "Clumping", "C+T", "LDpred")))
+
+
+# Measures: R2 & AUC
+
+# Remember that for the R2 values to be comparable to the SNP-h2 in binary traits
+# the estimate needs to be scaled for the sampling bias and population prevalence
+# See https://pubmed.ncbi.nlm.nih.gov/22714935/
+
+
+coef <- coef_to_liab(K_pop = 0.2, K_gwas = sum(y_train == 1)/length(y_train))
+
+all_pgs %>%
+  group_by(PGS) %>%
+  nest() %>%
+  summarise(R2 = map_dbl(data, ~cor(.x$y_test, .x$value)^2),
+            AUC = map_dbl(data, ~AUC(.x$value, .x$y_test))) %>%
+  mutate(R2_l = R2*coef) %>%
+  pivot_longer(2:4) %>%
+  ggplot(aes(x = name, y = value, fill = PGS)) + 
+  labs(y = " ", x = "Measure") +
+  geom_col(position = "dodge") +
+  facet_wrap(~name, scales = "free") +
+  theme_minimal()
+  
+
+# PGS OR quantiles 
+
+all_pgs %>%
+  group_by(PGS) %>%
+  mutate(Q = ntile(value, 5),
+         Q = paste0("Q", Q)) %>%
+  group_by(PGS) %>%
+  nest() %>%
+  mutate(model = map(data, ~ glm(y_test ~ Q, data = .x, family = "binomial")),
+         OR = map(model, tidy)) %>%
+  unnest(OR) %>%
+  filter(term %in% paste0("QQ", 2:5)) %>%
+  ggplot(aes(x = term, y = exp(estimate), fill = PGS)) + 
+  labs(y = "OR", x = "QX vs Q1") +
+  geom_col(position = "dodge") +
+  theme_minimal()
+  
+
+
+```
+
+What is the best prediction model for this phenotype?
+
+
+

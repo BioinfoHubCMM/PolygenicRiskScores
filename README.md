@@ -1,162 +1,25 @@
----
-title: Talk slides template
-tags: Templates, Talk
-description: View the slide with "Slide Mode".
----
+# Demystifying Polygenic Scores - developing intuition
+The polygenic score workshop is the third session of the BioinfoHub at the Center for Molecular Medicine (CMM). 
 
-# Understanding Polygenic Risk Scores
+## Workshop design
 
-<!-- Put the link to this slide here so people can follow -->
-slide: https://hackmd.io/V4e45imyQB6PkdNgOg3ybQ?both
+Polygenic scores (PGS) are statistical tools to summarise genetic risk. This workshop covers the basics of how PGS are developed using real genetic data and simulated phenotypes as the learning tools. We will follow the tutorial in the R Markdown file pgs_workshop.Rmd
 
----
+## Dataset
+A toy dataset of genetic information, with 2,001 individuals and 9,319 genetic variants. The genetic datasets is a subset of chromosome 22 from the [1000 Genomes Project](https://bochet.gcc.biostat.washington.edu/beagle/1000_Genomes_phase3_v5a/b37.vcf/chr22.1kg.phase3.v5a.vcf.gz)
 
-We have a collaborative session
+1. data/imp_1000k_chr22_QC
 
-please prepare laptop or smartphone to join!
+## Learning objectives
+In this workshop we will use the dataset to:  
 
----
-
-## Who am I?
-
-- Front-end developer
-- VSCode :heart: 
-- I use tabs. :cat: 
-
----
-
-### 70% of our users are developers. Developers :heart: GitHub.
-
----
-
-{%youtube E8Nj7RwXf0s %}
-
----
-
-### Usage flow
-
----
-
-
-```graphviz
-digraph {
-  compound=true
-  rankdir=RL
-
-  graph [ fontname="Source Sans Pro", fontsize=20 ];
-  node [ fontname="Source Sans Pro", fontsize=18];
-  edge [ fontname="Source Sans Pro", fontsize=12 ];
-
-
-  subgraph core {
-    c [label="Hackmd-it \ncore"] [shape=box]
-  }
+  1) **Learn how to simulate heritable phenotypes from real genotype data**
   
-  c -> sync [ltail=session lhead=session]
+  2) **Visualize and understand different PGS models**  
+  
+  3) **Understand a few common PGS prediction accuracy measures** 
+   
+## Other resources
+[bigsnpr](https://privefl.github.io/bigsnpr/): A useful R package to handle large genotype matrixes and use several statistical genetics methods.
 
-  subgraph cluster1 {
-     concentrate=true
-    a [label="Text source\nGithub, Gitlab, ..."] [shape=box]
-    b [label="HackMD Editor"] [shape=box]
-    sync [label="sync" shape=plaintext ]
-    b -> sync  [dir="both"]
-    sync -> a [dir="both"]
-    label="An edit session"
-  }
-}
-```
-
----
-
-### Architecture of extension
-
----
-
-![](https://i.imgur.com/ij69tPh.png)
-
----
-
-## Content script
-
-- Bind with each page
-- Manipulate DOM
-- Add event listeners
-- Isolated JavaScript environment
-  - It doesn't break things
-
----
-
-# :fork_and_knife: 
-
----
-
-<style>
-code.blue {
-  color: #337AB7 !important;
-}
-code.orange {
-  color: #F7A004 !important;
-}
-</style>
-
-- <code class="orange">onMessage('event')</code>: Register event listener
-- <code class="blue">sendMessage('event')</code>: Trigger event
-
----
-
-# :bulb: 
-
----
-
-- Dead simple API
-- Only cares about application logic
-
----
-
-```typescript
-import * as Channeru from 'channeru'
-
-// setup channel in different page environment, once
-const channel = Channeru.create()
-```
-
----
-
-```typescript
-// in background script
-const fakeLogin = async () => true
-
-channel.answer('isLogin', async () => {
-  return await fakeLogin()
-})
-```
-
-<br>
-
-```typescript
-// in inject script
-const isLogin = await channel.callBackground('isLogin')
-console.log(isLogin) //-> true
-```
-
----
-
-# :100: :muscle: :tada:
-
----
-
-### Wrap up
-
-- Cross envornment commnication
-- A small library to solve messaging pain
-- TypeScript Rocks :tada: 
-
----
-
-### Thank you! :sheep: 
-
-You can find me on
-
-- GitHub
-- Twitter
-- or email me
+[Genetics and Genomics Winter School - University of Queensland](https://cnsgenomics.com/data/teaching/GNGWS24/module5/): Materials from PGS part of winter school by Jian Zheng.
