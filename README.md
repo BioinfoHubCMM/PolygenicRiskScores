@@ -25,5 +25,5 @@ In this workshop we will use the dataset to:
 [Genetics and Genomics Winter School - University of Queensland](https://cnsgenomics.com/data/teaching/GNGWS24/module5/): Materials from PGS part of winter school by Jian Zheng.
 
 ## Contact
-The materials in this repository have been prepared and presented by Clara Albiñana (clara.albinana@psych.ox.ac.u).
+The materials in this repository have been prepared and presented by Clara Albiñana (clara.albinana@psych.ox.ac.uk).
 
