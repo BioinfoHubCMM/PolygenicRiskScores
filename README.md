@@ -23,3 +23,7 @@ In this workshop we will use the dataset to:
 [bigsnpr](https://privefl.github.io/bigsnpr/): A useful R package to handle large genotype matrixes and use several statistical genetics methods.
 
 [Genetics and Genomics Winter School - University of Queensland](https://cnsgenomics.com/data/teaching/GNGWS24/module5/): Materials from PGS part of winter school by Jian Zheng.
+
+## Contact
+The materials in this repository have been prepared and presented by Clara Albiñana (clara.albinana@psych.ox.ac.u).
+
